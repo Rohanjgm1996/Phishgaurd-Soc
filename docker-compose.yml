@@ -1,0 +1,106 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PhishGuard SOC — Docker Compose
+# Services: backend (FastAPI) + optional ClamAV daemon
+# Frontend is served as static files by the backend in production.
+# For development, run frontend separately with `npm run dev`.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Backend ──────────────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: phishguard-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      APP_NAME: "PhishGuard SOC"
+      DEBUG: "false"
+      SECRET_KEY: "${SECRET_KEY:-CHANGE_ME_IN_PRODUCTION_USE_LONG_RANDOM_VALUE}"
+      DATABASE_URL: "sqlite+aiosqlite:///./data/phishguard.db"
+      UPLOAD_DIR: "./data/uploads"
+      REPORTS_DIR: "./data/reports"
+      YARA_RULES_DIR: "./rules"
+      CLAMAV_ENABLED: "${CLAMAV_ENABLED:-false}"
+      CLAMAV_HOST: "clamav"
+      CLAMAV_PORT: "3310"
+      CORS_ORIGINS: '["http://localhost:5173","http://localhost:3000"]'
+      DEMO_ADMIN_USERNAME: "${DEMO_ADMIN_USERNAME:-admin}"
+      DEMO_ADMIN_PASSWORD: "${DEMO_ADMIN_PASSWORD:-Admin@123}"
+      MAX_FILE_SIZE_MB: "25"
+    volumes:
+      - phishguard_data:/app/data
+      - ./rules:/app/rules:ro
+    depends_on:
+      clamav:
+        condition: service_healthy
+        required: false
+    networks:
+      - phishguard_net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ── ClamAV (optional) ─────────────────────────────────────────────────────────
+  # To enable: set CLAMAV_ENABLED=true in your .env
+  # ClamAV downloads signatures on first start — may take a few minutes.
+  clamav:
+    image: clamav/clamav:stable
+    container_name: phishguard-clamav
+    restart: unless-stopped
+    profiles:
+      - clamav  # Only starts if you run: docker compose --profile clamav up
+    environment:
+      CLAMAV_NO_CLAMD: "false"
+      CLAMAV_NO_FRESHCLAMD: "false"
+    volumes:
+      - clamav_db:/var/lib/clamav
+    networks:
+      - phishguard_net
+    healthcheck:
+      test: ["CMD", "clamdcheck.sh"]
+      interval: 60s
+      timeout: 20s
+      retries: 5
+      start_period: 120s  # DB download takes time
+
+  # ── Frontend dev server (development only) ────────────────────────────────────
+  # Only needed during development. In production, frontend is bundled into backend.
+  frontend-dev:
+    image: node:20-alpine
+    container_name: phishguard-frontend-dev
+    restart: unless-stopped
+    profiles:
+      - dev  # Only starts if you run: docker compose --profile dev up
+    working_dir: /app
+    command: sh -c "npm ci && npm run dev -- --host"
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app:delegated
+      - /app/node_modules
+    environment:
+      VITE_API_URL: "http://localhost:8000"
+    networks:
+      - phishguard_net
+
+
+volumes:
+  phishguard_data:
+    name: phishguard_data
+  clamav_db:
+    name: phishguard_clamav_db
+
+
+networks:
+  phishguard_net:
+    name: phishguard_net
+    driver: bridge
